@@ -1,0 +1,583 @@
+---
+title: "Analysis and Graph Generation"
+author: "Tan Kia Leng"
+date: "2023-11-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(afex)
+library(emmeans)
+```
+
+
+## Reading in dataset
+```{r}
+## Converting data source from sav to csv
+# haven::read_sav("raw/Dataset (1).sav") %>% 
+#   write.csv("data/data_raw (from sav).csv",row.names=FALSE)
+
+data <- read_csv("data/data_raw (from sav).csv")
+```
+
+## Data Cleaning, selection of variables
+Use ends_with to select variables of concern.
+
+Note: Columns where conditions are NA are removed.
+- Should print information in output
+
+```{r}
+vars_of_interest <- c("success","stress","opt","RFS_pro","RFS_pre")
+select_vars <- function(data,vars_of_interest) {
+  suffix <- paste0("[0-9]_",vars_of_interest,"$")
+  selected <- data %>% 
+    select(ID, Condition, matches(suffix)) 
+  return(selected)
+}
+
+data_req <- select_vars(data,vars_of_interest = vars_of_interest)
+
+```
+
+
+## Time Manipulation
+Output: One row represents each level of Intervention-Time for each individual, in tidy format
+e.g. Promotion-S3-Individual-1 in each role
+
+```{r}
+
+rename_cols <- function(data) {
+  data %>% rename("Success" = "success",
+           "Stress" = "stress",
+           "Optimism" = "opt",
+           "RFS_Promotion" = "RFS_pro",
+           "RFS_Prevention" = "RFS_pre",
+           "Intervention" = "Condition") 
+}
+
+current_period <- function(data) {
+  data %>% 
+    pivot_longer(cols= matches(vars_of_interest),
+                 names_to=c("Time","Var"),values_to=c("Value"),
+                 names_pattern=('(S[1-9])_(.*)')) %>% 
+    pivot_wider(names_from = Var, values_from = Value) %>% rename_cols()  %>% 
+  
+    mutate(Intervention_Pro = ifelse(str_detect(Intervention,c("Promotion|Combined")),1,0),
+         Intervention_Pre = ifelse(str_detect(Intervention,c("Prevention|Combined")),1,0),
+         .after = "Intervention"
+         )
+}
+
+data_pred_curr <- current_period(data_req)
+
+predictors <- c("stress","opt","RFS_pre","RFS_pro")
+dv <- c("success")
+
+
+future_pred <- function(data, predictors,dv) {
+  data_req %>% 
+    # pivot variables longer to have one row rep var-time pair
+    pivot_longer(cols= matches(vars_of_interest),
+                   names_to=c("Time","Var"),values_to=c("Value"),
+                   names_pattern=('(S[1-9])_(.*)')) %>% 
+    # drop success at S1 and predicotrs at S5
+    mutate(Time = as.numeric(str_extract(Time,"[0-9]")),
+           keep = ((Var %in% predictors) &(Time<5))|((Var %in% dv) &(Time>1))) %>% 
+    filter(keep == TRUE) %>% 
+    mutate(keep = NULL,
+           
+    # match predictors at previous time to success at curr time
+           is_predictor = Var %in% predictors,
+           pred_for = case_when(
+             is_predictor ~ paste0("S",ifelse(Time+1==2,3,Time+1)),
+             TRUE ~ paste0("S",Time)),
+           is_predictor=NULL) %>% 
+    pivot_wider(values_from=c(Time,Value),names_from = Var) %>% 
+    rename_with(~ str_remove(.x,"Value_")) %>% 
+    
+    rename_cols() %>% 
+    mutate(Intervention_Pro = ifelse(str_detect(Intervention,c("Promotion|Combined")),1,0),
+           Intervention_Pre = ifelse(str_detect(Intervention,c("Prevention|Combined")),1,0),
+           .after = "Intervention"
+           )
+} 
+
+data_pred_future <- future_pred(data_req,predictors,dv)
+```
+
+
+```{r}
+filter_condition <- function(data, conditions_to_keep) {
+  data %>% 
+    filter(Intervention %in% conditions_to_keep)
+}
+
+```
+
+
+```{r}
+data_pred_future %>% 
+  select(Intervention,RFS_Promotion,Optimism,RFS_Prevention,Stress,Success)
+```
+
+```{r}
+data_for_corrs <- data_pred_future %>% 
+  select(Intervention_Pro,RFS_Promotion,Optimism,
+         Intervention_Pre,RFS_Prevention,Stress,
+         Success)
+correlations <- cor(data_for_corrs,use="pairwise.complete.obs")
+# write.csv(correlations,file="correlations.csv")
+```
+
+
+## Plot
+```{r}
+mean_two_sd_optimism <- function(data) {
+  mean_opt <- mean(data$Optimism,na.rm=TRUE)
+  sd_opt <- sd(data$Optimism,na.rm=TRUE)
+  
+  return (c("Low"= mean_opt-2*sd_opt,
+            "Medium" = mean_opt,
+            "High" = mean_opt+2*sd_opt))
+}
+
+mean_two_sd_stress <- function(data) {
+  mean_stress <- mean(data$Stress,na.rm=TRUE)
+  sd_stress <- sd(data$Stress,na.rm=TRUE)
+  
+  return (c("Low"= mean_stress-2*sd_stress,
+            "Medium" = mean_stress,
+            "High" = mean_stress+2*sd_stress))
+}
+```
+
+
+## ANOVA
+```{r}
+
+intv_pro_opt_model <- function(data) {
+  print(data)
+  lm(Success ~ Intervention*Optimism, data = data)
+}
+
+presence_pro_opt_model <- function(data) {
+  lm(Success ~ Intervention_Pro*Optimism, data = data)
+}
+
+rfs_pro_opt_model <- function(data) {
+  lm(Success ~ RFS_Promotion*Optimism, data = data)
+}
+
+
+intv_pre_stress_model <- function(data) {
+  print(data)
+  lm(Success ~ Intervention*Stress, data = data)
+}
+
+presence_pre_stress_model <- function(data) {
+  lm(Success ~ Intervention_Pre*Stress, data = data)
+}
+
+
+rfs_pre_stress_model <- function(data) {
+  lm(Success ~ RFS_Prevention*Stress, data = data)
+}
+
+
+```
+
+## Correlation of data at the same time point
+How do interventions, regulatory focus strategies, optimism and stress level relate to feelings of success at any time points?
+
+Note: purely correlational
+
+Within the same time, feelings of success and optimism levels were measured after 
+
+InterPro x Opt --> Success
+
+
+### Pro
+
+#### Current
+```{r}
+data <- data_pred_curr %>% 
+  filter_condition(c("Promotion Focus","Control")) %>% 
+  filter(Time != "S1")
+
+intv_pro_opt_curr <-intv_pro_opt_model(data)
+summary(intv_pro_opt_curr)
+
+emm <- emmeans(intv_pro_opt_curr, ~ Intervention | Optimism,
+        at = list(Optimism=mean_two_sd_optimism(data))) 
+pairs(emm)
+
+plot_data <- data.frame(
+  Intervention = rep(sort(unique(data$Intervention)),each=3),
+  Optimism = rep(mean_two_sd_optimism(data),times=2),
+  Optimism_Level = rep(names(mean_two_sd_optimism(data)),times=2)
+  ) %>% 
+  mutate(Intervention = factor(Intervention,levels=c("Control","Promotion Focus")),
+         Optimism_Level = factor(Optimism_Level,levels=c("Low","Medium","High")))
+                              
+
+plot_data$Success <- predict(intv_pro_opt_curr,plot_data)
+
+ggplot(plot_data) +
+  geom_col(aes(x=Intervention,y=Success,fill=Optimism_Level),position = "dodge") +
+  scale_fill_manual(values = c("Low" = "#CCCCCC", "Medium" = "#969696", "High" = "#636363")) +
+  labs(title = "Effect of Promotion-focused Intervention on Success, \
+Moderated by Optimism", 
+       x = "Intervention", y = "Success",fill="Optimism") +
+  theme_minimal()
+
+```
+
+```{r}
+data <- data_pred_curr %>% 
+  filter(Time != "S1")
+
+presence_pro_opt_curr <- presence_pro_opt_model(data)
+summary(presence_pro_opt_curr)
+
+emm <- emmeans(presence_pro_opt_curr, ~ Intervention_Pro | Optimism,
+        at = list(Optimism=mean_two_sd_optimism(data))) 
+pairs(emm)
+
+plot_data <- data.frame(
+  Intervention_Pro = rep(c(0,1),each=3),
+  Optimism = rep(mean_two_sd_optimism(data),times=2),
+  Optimism_Level = rep(names(mean_two_sd_optimism(data)),times=2)
+  ) %>% 
+  mutate(Optimism_Level = factor(Optimism_Level,levels=c("Low","Medium","High")))
+                              
+
+plot_data$Success <- predict(presence_pro_opt_curr,plot_data)
+plot_data$Intervention_Pro <- ifelse(plot_data$Intervention_Pro == 0,"Absent","Present")
+
+ggplot(plot_data) +
+  geom_col(aes(x=Intervention_Pro,y=Success,fill=Optimism_Level),position = "dodge") +
+  scale_fill_manual(values = c("Low" = "#CCCCCC", "Medium" = "#969696", "High" = "#636363")) +
+  labs(title = "Effect of Presence of Promotion-focused Intervention on Success,\
+Moderated by Optimism", 
+       x = "Presence of Promotion-Focused Intervention", y = "Success",fill="Optimism") +
+  theme_minimal()
+
+```
+
+```{r}
+rfs_pro_opt_curr <- rfs_pro_opt_model(data_pred_curr)
+summary(rfs_pro_opt_curr)
+
+plot_data <- data.frame(
+  RFS_Promotion = rep(c(1,5),each=3),
+  Optimism = rep(mean_two_sd_optimism(data),times=2),
+  Optimism_Level = rep(names(mean_two_sd_optimism(data)),times=2)
+  ) %>% 
+  mutate(Optimism_Level = factor(Optimism_Level,levels=c("Low","Medium","High")))
+                              
+
+plot_data$Success <- predict(rfs_pro_opt_curr,plot_data)
+
+
+ggplot(plot_data) +
+  geom_path(aes(x=RFS_Promotion,y=Success,linetype=Optimism_Level), show.legend=FALSE) +
+  geom_text(aes(x=RFS_Promotion,y=Success,label=Optimism_Level), nudge_x = 0.05,hjust=0,
+            data = filter(plot_data, RFS_Promotion == 5)) +
+  scale_x_continuous(limits = c(1, 5.5)) +
+  scale_y_continuous(limits = c(1,5)) +
+  labs(title = "Effect of Self-Reported Promotion-Focus Scores on Success, \
+Moderated by Optimism", 
+       x = "RFSS Promotion Score", y = "Success") +
+  theme_minimal()
+```
+
+#### Predictions
+```{r}
+data <- data_pred_future %>% 
+  filter_condition(c("Promotion Focus","Control"))
+intv_pro_opt_future <- intv_pro_opt_model(data)
+summary(intv_pro_opt_future)
+
+emm <- emmeans(intv_pro_opt_future, ~ Intervention | Optimism,
+        at = list(Optimism=mean_two_sd_optimism(data))) 
+pairs(emm)
+
+plot_data <- data.frame(
+  Intervention = rep(sort(unique(data$Intervention)),each=3),
+  Optimism = rep(mean_two_sd_optimism(data),times=2),
+  Optimism_Level = rep(names(mean_two_sd_optimism(data)),times=2)
+  ) %>% 
+  mutate(Intervention = factor(Intervention,levels=c("Control","Promotion Focus")),
+         Optimism_Level = factor(Optimism_Level,levels=c("Low","Medium","High")))
+                              
+
+plot_data$Success <- predict(intv_pro_opt_future,plot_data)
+
+ggplot(plot_data) +
+  geom_col(aes(x=Intervention,y=Success,fill=Optimism_Level),position = "dodge") +
+  scale_fill_manual(values = c("Low" = "#CCCCCC", "Medium" = "#969696", "High" = "#636363")) +
+  labs(title = "Effect of Promotion-focused Intervention on Future Success,\
+Moderated by Optimism", 
+       x = "Intervention", y = "Success",fill="Optimism") +
+  theme_minimal()
+```
+
+Promotion-focused intervention increases feelings of success. Increased optimism at previous time point also predicts for increased feelings of success. Optimism decreases feelings of success among individuals who underwent a the promotion-focused intervention.
+
+```{r}
+
+presence_pro_opt_future <- presence_pro_opt_model(data_pred_future)
+summary(presence_pro_opt_future)
+
+emm <- emmeans(presence_pro_opt_future, ~ Intervention_Pro | Optimism,
+        at = list(Optimism=mean_two_sd_optimism(data_pred_future))) 
+pairs(emm)
+
+plot_data <- data.frame(
+  Intervention_Pro = rep(c(0,1),each=3),
+  Optimism = rep(mean_two_sd_optimism(data),times=2),
+  Optimism_Level = rep(names(mean_two_sd_optimism(data)),times=2)
+  ) %>% 
+  mutate(Optimism_Level = factor(Optimism_Level,levels=c("Low","Medium","High")))
+                              
+
+plot_data$Success <- predict(presence_pro_opt_future,plot_data)
+plot_data$Intervention_Pro <- ifelse(plot_data$Intervention_Pro == 0,"Absent","Present")
+
+ggplot(plot_data) +
+  geom_col(aes(x=Intervention_Pro,y=Success,fill=Optimism_Level),position = "dodge") +
+  scale_fill_manual(values = c("Low" = "#CCCCCC", "Medium" = "#969696", "High" = "#636363")) +
+  labs(title = "Effect of Presence of Promotion-focused Intervention on \
+Future Success, Moderated by Optimism", 
+       x = "Presence of Promotion-Focused Intervention", y = "Success",fill="Optimism") +
+  theme_minimal()
+
+```
+
+
+```{r}
+rfs_pro_opt_future <- rfs_pro_opt_model(data_pred_future)
+summary(rfs_pro_opt_future)
+
+plot_data <- data.frame(
+  RFS_Promotion = rep(c(1,5),each=3),
+  Optimism = rep(mean_two_sd_optimism(data),times=2),
+  Optimism_Level = rep(names(mean_two_sd_optimism(data)),times=2)
+  ) %>% 
+  mutate(Optimism_Level = factor(Optimism_Level,levels=c("Low","Medium","High")))
+                              
+
+plot_data$Success <- predict(rfs_pro_opt_future,plot_data)
+
+
+ggplot(plot_data) +
+  geom_path(aes(x=RFS_Promotion,y=Success,linetype=Optimism_Level), show.legend=FALSE) +
+  geom_text(aes(x=RFS_Promotion,y=Success,label=Optimism_Level), nudge_x = 0.05,hjust=0,
+            data = filter(plot_data, RFS_Promotion == 5)) +
+  scale_x_continuous(limits = c(1, 5.5)) +
+  scale_y_continuous(limits = c(1, 5)) +
+  labs(title = "Effect of Self-Reported Promotion-Focus Scores on Future Success, \
+Moderated by Optimism", 
+       x = "RFSS Promotion Score", y = "Success") +
+  theme_minimal()
+```
+
+Current states of promotion-focused strategy and optimism do not predict future feelings of success
+
+
+
+### Prevention
+#### Current
+```{r}
+data <- data_pred_curr %>% 
+  filter_condition(c("Prevention Focus","Control")) %>% 
+  filter(Time != "S1")
+intv_pre_stress_curr <- intv_pre_stress_model(data)
+summary(intv_pre_stress_curr)
+emm <- emmeans(intv_pre_stress_curr, ~ Intervention | Stress,
+        at = list(Stress=mean_two_sd_stress(data))) 
+pairs(emm)
+
+plot_data <- data.frame(
+  Intervention = rep(sort(unique(data$Intervention)),each=3),
+  Stress = rep(mean_two_sd_optimism(data),times=2),
+  Stress_Level = rep(names(mean_two_sd_optimism(data)),times=2)
+  ) %>% 
+  mutate(Intervention = factor(Intervention,levels=c("Control","Prevention Focus")),
+         Stress_Level = factor(Stress_Level,levels=c("Low","Medium","High")))
+                              
+
+plot_data$Success <- predict(intv_pre_stress_curr,plot_data)
+
+ggplot(plot_data) +
+  geom_col(aes(x=Intervention,y=Success,fill=Stress_Level),position = "dodge") +
+  scale_fill_manual(values = c("Low" = "#CCCCCC", "Medium" = "#969696", "High" = "#636363")) +
+  labs(title = "Effect of Prevention-Focused Intervention on Success,\
+Moderated by Stress", 
+       x = "Intervention", y = "Success",fill="Stress") +
+  theme_minimal()
+```
+
+For participants with low stress, Prevention focused interventions decreases feelings of success. However, they increase feelings of success for participants with high stress levels
+
+```{r}
+data <- data_pred_curr %>% 
+  filter(Time != "S1")
+
+presence_pre_stress_curr <- presence_pre_stress_model(data)
+summary(presence_pre_stress_curr)
+emm <- emmeans(presence_pre_stress_curr, ~ Intervention_Pre | Stress,
+        at = list(Stress=mean_two_sd_stress(data))) 
+pairs(emm)
+
+
+plot_data <- data.frame(
+  Intervention_Pre = rep(c(0,1),each=3),
+  Stress= rep(mean_two_sd_stress(data),times=2),
+  Stress_Level = rep(names(mean_two_sd_stress(data)),times=2)
+  ) %>% 
+  mutate(Stress_Level = factor(Stress_Level,levels=c("Low","Medium","High")))
+                              
+plot_data$Success <- predict(presence_pre_stress_curr,plot_data)
+plot_data$Intervention_Pre <- ifelse(plot_data$Intervention_Pre == 0,"Absent","Present")
+
+ggplot(plot_data) +
+  geom_col(aes(x=Intervention_Pre,y=Success,fill=Stress_Level),position = "dodge") +
+  scale_fill_manual(values = c("Low" = "#CCCCCC", "Medium" = "#969696", "High" = "#636363")) +
+  labs(title = "Effect of Presence of Prevention-focused Intervention on Success,\
+Moderated by Stress", 
+       x = "Presence of Prevention-Focused Intervention", y = "Success",fill="Stress") +
+  theme_minimal()
+
+```
+
+```{r}
+rfs_pre_stress_curr <- rfs_pre_stress_model(data_pred_curr)
+summary(rfs_pre_stress_curr)
+
+plot_data <- data.frame(
+  RFS_Prevention = rep(c(1,5),each=3),
+  Stress = rep(mean_two_sd_stress(data),times=2),
+  Stress_Level = rep(names(mean_two_sd_stress(data)),times=2)
+  ) %>% 
+  mutate(Stress_Level = factor(Stress_Level,
+                               labels=c("Low Stress", "Medium Stress", "High Stress"),
+                               levels=c("Low","Medium","High")))
+                              
+
+plot_data$Success <- predict(rfs_pre_stress_curr,plot_data)
+
+
+ggplot(plot_data) +
+  geom_path(aes(x=RFS_Prevention,y=Success,linetype=Stress_Level)) +
+  # geom_text(aes(x=RFS_Prevention,y=Success,label=Stress_Level), nudge_x = 0.05,hjust=0,
+  #           data = filter(plot_data, RFS_Prevention == 5)) +
+  # scale_x_continuous(limits = c(1, 6),breaks = seq(1, 5, by = 1)) +
+  scale_y_continuous(limits = c(0, 4)) +
+  labs(title = "Effect of Self-Reported Prevention-Focus Scores on Success, \
+Moderated by Stress", linetype = "Stress",
+       x = "RFSS Prevention Score", y = "Success") +
+  theme_minimal()
+```
+
+Feelings of success are higher among participants higher among participants who are more stressed. Non significant Stress x RFS_pre interaction
+
+
+## Prediction
+
+```{r}
+data <- data_pred_future %>% 
+  filter_condition(c("Prevention Focus","Control"))
+intv_pre_stress_future <- intv_pre_stress_model(data)
+summary(intv_pre_stress_future)
+emm <- emmeans(intv_pre_stress_future, ~ Intervention | Stress,
+        at = list(Stress=mean_two_sd_stress(data))) 
+pairs(emm)
+
+plot_data <- data.frame(
+  Intervention = rep(sort(unique(data$Intervention)),each=3),
+  Stress = rep(mean_two_sd_stress(data),times=2),
+  Stress_Level = rep(names(mean_two_sd_stress(data)),times=2)
+  ) %>% 
+  mutate(Intervention = factor(Intervention,levels=c("Control","Prevention Focus")),
+         Stress_Level = factor(Stress_Level,levels=c("Low","Medium","High")))
+plot_data$Success <- predict(intv_pre_stress_future,plot_data)
+
+ggplot(plot_data) +
+  geom_col(aes(x=Intervention,y=Success,fill=Stress_Level),position = "dodge") +
+  scale_fill_manual(values = c("Low" = "#CCCCCC", "Medium" = "#969696", "High" = "#636363")) +
+  labs(title = "Effect of Prevention-Focused Intervention on Future Success, \
+Moderated by Stress", 
+       x = "Intervention", y = "Success",fill="Stress") +
+  theme_minimal()
+```
+
+Prevention-focused intervention decreases feelings of success. Increased stress has no significant effect on feelings of success. Stress increases feelings of success among individuals who underwent the prevention-focused intervention.
+
+
+```{r}
+presence_pre_stress_future <- presence_pre_stress_model(data_pred_future)
+summary(presence_pre_stress_future)
+
+library(emmeans)
+emm <- emmeans(presence_pre_stress_future, ~ Intervention_Pre | Stress,
+        at = list(Stress=mean_two_sd_stress(data_pred_future))) 
+pairs(emm)
+
+plot_data <- data.frame(
+  Intervention_Pre = rep(c(0,1),each=3),
+  Stress = rep(mean_two_sd_stress(data),times=2),
+  Stress_Level = rep(names(mean_two_sd_stress(data)),times=2)
+  ) %>% 
+  mutate(Stress_Level = factor(Stress_Level,levels=c("Low","Medium","High")))
+
+plot_data$Success <-predict(presence_pre_stress_future,plot_data)
+plot_data$Intervention_Pre <- ifelse(plot_data$Intervention_Pre == 0,"Absent","Present")
+
+ggplot(plot_data) +
+  geom_col(aes(x=Intervention_Pre,y=Success,fill=Stress_Level),position = "dodge") +
+  scale_fill_manual(values = c("Low" = "#CCCCCC", "Medium" = "#969696", "High" = "#636363")) +
+  labs(title = "Effect of Presence of Prevention-focused Intervention on \
+Future Success, Moderated by Stress", 
+       x = "Presence of Prevention-Focused Intervention", y = "Success",fill="Stress") +
+  theme_minimal()
+
+```
+
+
+```{r}
+rfs_pre_stress_future <- rfs_pre_stress_model(data_pred_future)
+summary(rfs_pre_stress_future)
+
+plot_data <- data.frame(
+  RFS_Prevention = rep(c(1,5),each=3),
+  Stress = rep(mean_two_sd_stress(data),times=2),
+  Stress_Level = rep(names(mean_two_sd_stress(data)),times=2)
+  ) %>% 
+  mutate(Stress_Level = factor(Stress_Level,
+                               labels=c("Low Stress", "Medium Stress", "High Stress"),
+                               levels=c("Low","Medium","High")))
+                              
+
+plot_data$Success <- predict(rfs_pre_stress_future,plot_data)
+
+
+ggplot(plot_data) +
+  geom_path(aes(x=RFS_Prevention,y=Success,linetype=Stress_Level)) +
+  # geom_text(aes(x=RFS_Prevention,y=Success,label=Stress_Level), nudge_x = 0.05,  
+  #           ,hjust=0,
+  #           data = filter(plot_data, RFS_Prevention == 5)) +
+  # scale_x_continuous(limits = c(1, 6),breaks = seq(1, 5, by = 1)) +
+  scale_y_continuous(limits = c(0, 4)) +
+  labs(title = "Effect of Self-Reported Prevention-Focus Scores on Future Success, \
+Moderated by Stress", linetype = "Stress",
+       x = "RFSS Prevention Score", y = "Success") +
+  theme_minimal()
+```
+
+Current states of prevention-focused strategy and stress do not predict future feelings of success
